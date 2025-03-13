@@ -1,0 +1,4 @@
+* text=auto
+*.pkl binary
+*.index binary
+*.md text eol=lf

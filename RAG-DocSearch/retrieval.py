@@ -1,10 +1,10 @@
 import os
 import pickle
-import faiss
 import numpy as np
 from transformers import AutoTokenizer, AutoModel
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import faiss  # 新增导入
 
 # Initialize the tokenizer and model for generating embeddings
 tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
@@ -24,58 +24,82 @@ def preprocess_query(query):
     keywords = [w for w in words if w not in question_words]
     return ' '.join(keywords)
 
-def retrieve_relevant_documents(query, index_path='faiss_index', store_path='doc_store.pkl', similarity_threshold=0.01):
-    """Retrieves relevant documents using both FAISS and TF-IDF."""
+def retrieve_relevant_documents(query, index_path='faiss_index.bin', mapping_path='doc_store.pkl', k=5):
+    """使用FAISS向量数据库检索相关文档"""
     try:
+        # 加载FAISS索引
         index = faiss.read_index(index_path)
-        with open(store_path, 'rb') as f:
-            doc_store = pickle.load(f)
+        
+        # 加载内容映射（每次查询时重新加载）
+        try:
+            content_mapping = load_content_mapping(mapping_path)
+        except Exception as e:
+            print(f"Error loading mapping: {e}")
+            content_mapping = {}
+
+        # 生成查询向量并确保形状正确
+        query_embedding = generate_embedding(query)
+        if query_embedding.ndim == 1:
+            query_embedding = query_embedding.reshape(1, -1)
+        
+        # 验证维度是否匹配
+        if query_embedding.shape[1] != index.d:
+            raise ValueError(f"Embedding dimension {query_embedding.shape[1]} does not match index dimension {index.d}")
+        
+        # 执行搜索
+        distances, indices = index.search(query_embedding, k)
+        
+        # 处理结果
+        relevant_docs = []
+        print("\nRelevant chunks:")
+        for i, (distance, idx) in enumerate(zip(distances[0], indices[0])):
+            if idx == -1:
+                continue
+            try:
+                idx = int(idx)
+                content = content_mapping.get(idx, "Content not found")
+            except KeyError:
+                content = "Content not found"
+            
+            print(f"\nResult {i+1}:")
+            print(f"Distance: {distance:.3f}")
+            print(f"Index: {idx}")
+            if content != "Content not found":
+                relevant_docs.append(content.get('content'))  # 现在添加的是字符串
+        
+        print(f"\nFound {len(relevant_docs)} relevant chunks")
+        return relevant_docs
+        
     except Exception as e:
-        print(f"Error reading FAISS index or document store: {e}")
+        print(f"Error searching FAISS: {e}")
         return []
 
-    # Preprocess query
-    processed_query = preprocess_query(query)
-    query_embedding = generate_embedding(processed_query)
-    distances, indices = index.search(query_embedding, k=5)
-    
-    candidates = []
-    candidate_indices = []
-    for idx in indices[0]:
-        if idx != -1 and idx in doc_store:
-            candidates.append(doc_store[idx]['content'])
-            candidate_indices.append(idx)
-    
-    if not candidates:
-        return []
+# Improved vectorization
+vectorizer = TfidfVectorizer(
+    stop_words='english',
+    ngram_range=(1, 3),  # Use up to trigrams
+    min_df=1,
+    max_df=0.9,
+    strip_accents='unicode',
+    use_idf=True,
+    smooth_idf=True,
+    sublinear_tf=True  # Apply sublinear TF scaling
+)
 
-    # Improved vectorization
-    vectorizer = TfidfVectorizer(
-        stop_words='english',
-        ngram_range=(1, 3),  # Use up to trigrams
-        min_df=1,
-        max_df=0.9,
-        strip_accents='unicode',
-        use_idf=True,
-        smooth_idf=True,
-        sublinear_tf=True  # Apply sublinear TF scaling
-    )
+# 在retrieve_relevant_documents函数之前添加
+def load_content_mapping(mapping_path='doc_store.pkl'):
+    """加载索引到内容的映射"""
+    if not os.path.exists(mapping_path):
+        raise FileNotFoundError(f"Mapping file {mapping_path} does not exist.")
     
-    # Vectorize documents
-    tfidf_matrix = vectorizer.fit_transform([processed_query] + candidates)
-    cosine_similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
-    
-    relevant_docs = []
-    print("\nRelevant chunks:")
-    for i, (similarity, idx) in enumerate(zip(cosine_similarities, candidate_indices)):
-        chunk_info = doc_store[idx]
-        
-        print(f"\nFrom {chunk_info['source']} (Chunk {chunk_info['chunk_id']}):")
-        print(f"Similarity: {similarity:.3f}")
-        print(f"Content: {chunk_info['content']}")
-        
-        if similarity > 0 or i == 0:  # Include at least one result
-            relevant_docs.append(chunk_info['content'])
-    
-    print(f"\nFound {len(relevant_docs)} relevant chunks")
-    return relevant_docs
+    try:
+        with open(mapping_path, 'rb') as f:
+            return {int(k): v for k, v in pickle.load(f).items()}  # 确保key是int类型
+    except Exception as e:
+        raise RuntimeError(f"Failed to load mapping: {e}")
+
+
+if __name__ == "__main__":
+    # 测试代码
+    test_query = "测试查询"
+    results = retrieve_relevant_documents(test_query)

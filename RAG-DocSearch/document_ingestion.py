@@ -1,10 +1,11 @@
 import os
 import sys
 import pickle
-from PyPDF2 import PdfReader
-import faiss
 import numpy as np
+from PyPDF2 import PdfReader
 from transformers import AutoTokenizer, AutoModel
+import json
+import faiss  # 新增FAISS依赖
 
 # Initialize the tokenizer and model for generating embeddings
 tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
@@ -44,13 +45,38 @@ def generate_embedding(text):
     inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True)
     outputs = model(**inputs)
     return outputs.last_hidden_state.mean(dim=1).detach().numpy()
-
-def save_embeddings_to_faiss(embeddings, index_path='faiss_index'):
-    """Saves the embeddings to a FAISS index."""
-    index = faiss.IndexFlatL2(embeddings.shape[1])
-    index.add(embeddings)
-    faiss.write_index(index, index_path)
-    print("Embeddings saved to FAISS index.")
+    """Saves the embeddings and documents to Redis."""
+    client = Redis(host=redis_host, port=redis_port, db=redis_db)
+    
+    # Create Redis index for vector similarity search
+    try:
+        schema = (
+            VectorField("embedding", "FLOAT32", "FLAT", {
+                "TYPE": "FLOAT32",
+                "DIM": embeddings.shape[1],
+                "DISTANCE_METRIC": "L2"
+            }),
+            TextField("content"),
+            TextField("source"),
+            TextField("chunk_id")
+        )
+        client.ft("doc_idx").create_index(schema)
+    except Exception as e:
+        print(f"Index might already exist: {e}")
+    
+    # Store documents and embeddings
+    pipe = client.pipeline()
+    for idx, (embedding, doc_info) in enumerate(zip(embeddings, doc_store.values())):
+        key = f"doc:{idx}"
+        vector_data = {
+            'embedding': embedding.tobytes(),
+            'content': doc_info['content'],
+            'source': doc_info['source'],
+            'chunk_id': str(doc_info['chunk_id'])
+        }
+        pipe.hset(key, mapping=vector_data)
+    pipe.execute()
+    print(f"Saved {len(doc_store)} documents to Redis")
 
 def split_into_chunks(text, chunk_size=1000, overlap=100):
     """Split text into overlapping chunks."""
@@ -65,6 +91,20 @@ def split_into_chunks(text, chunk_size=1000, overlap=100):
         start = end - overlap
     
     return chunks
+
+# 需要先安装faiss：pip install faiss-cpu
+
+def save_to_faiss(embeddings, doc_store):
+    """将embeddings保存到FAISS索引"""
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings.astype('float32'))
+    
+    # 保存索引和文档存储
+    faiss.write_index(index, "faiss_index.bin")
+    with open('doc_store.pkl', 'wb') as f:
+        pickle.dump(doc_store, f)
+    print(f"Saved {len(doc_store)} documents to FAISS")
 
 def ingest_documents(directory):
     """Ingests all documents in a directory."""
@@ -95,9 +135,7 @@ def ingest_documents(directory):
     
     if embeddings:
         embeddings = np.vstack(embeddings)
-        save_embeddings_to_faiss(embeddings)
-        with open('doc_store.pkl', 'wb') as f:
-            pickle.dump(doc_store, f)
+        save_to_faiss(embeddings, doc_store)  # 替换原来的save_to_redis调用
         print(f"Saved {len(doc_store)} chunks to store")
     
     return chunks
@@ -114,5 +152,3 @@ if __name__ == "__main__":
         sys.exit(1)
     
     documents = ingest_documents(directory)
-    for filename, content in documents.items():
-        print(f"Document: {filename}\nContent: {content}\n")

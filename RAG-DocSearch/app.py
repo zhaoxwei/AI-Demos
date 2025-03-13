@@ -5,6 +5,9 @@ def query_knowledge_base():
     """Query the knowledge base and generate a response."""
     query = input("Enter your query: ")
     relevant_docs = retrieve_relevant_documents(query)
+    print("\nRetrieved relevant documents:")
+    for doc in relevant_docs:
+        print(doc)  
     
     if relevant_docs:
         context = " ".join(relevant_docs)
@@ -21,5 +24,6 @@ def main():
         if input("\nAsk another question? (y/n): ").lower() != 'y':
             break
 
+# 示例调用代码
 if __name__ == "__main__":
     main()
